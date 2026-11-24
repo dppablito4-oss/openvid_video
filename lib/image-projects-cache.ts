@@ -105,7 +105,8 @@ export async function saveImageProject(project: Omit<ImageProject, "id" | "image
             const store = transaction.objectStore(STORE_NAME);
             const request = store.put(fullProject);
             
-            request.onsuccess = () => resolve(fullProject);
+            transaction.oncomplete = () => resolve(fullProject);
+            transaction.onabort = () => reject(transaction.error);
             request.onerror = () => reject(request.error);
         });
     } catch (error) {
@@ -145,7 +146,8 @@ export async function updateImageProject(id: string, updates: Partial<Omit<Image
             const store = transaction.objectStore(STORE_NAME);
             const request = store.put(updated);
             
-            request.onsuccess = () => resolve(updated);
+            transaction.oncomplete = () => resolve(updated);
+            transaction.onabort = () => reject(transaction.error);
             request.onerror = () => reject(request.error);
         });
     } catch (error) {

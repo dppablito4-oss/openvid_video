@@ -198,34 +198,34 @@ export function useImageProjects() {
         }
     }, [loadProjects]);
 
+    const currentProjectId = currentProject?.id ?? null;
     const saveCurrentProject = useCallback(async (
         updates: Partial<Omit<ImageProject, "id" | "createdAt">>
     ): Promise<ImageProject | null> => {
-        if (!currentProject) {
+        if (!currentProjectId) {
             console.warn("No current project to save");
             return null;
         }
 
         setIsSaving(true);
         try {
-            const existing = await getImageProject(currentProject.id);
+            const existing = await getImageProject(currentProjectId);
             if (!existing) {
-                console.warn(`Project ${currentProject.id} no longer exists, skipping save`);
-                setCurrentProject(null);
-                return null;
+                throw new Error(`Project ${currentProjectId} no longer exists`);
             }
 
-            const updated = await updateImageProject(currentProject.id, updates);
-            setCurrentProject(updated);
+            const updated = await updateImageProject(currentProjectId, updates);
+            // An older write must never select a project the user has left.
+            setCurrentProject(previous => previous?.id === currentProjectId ? updated : previous);
             await loadProjects(false);
             return updated;
         } catch (error) {
             console.error("Error saving project:", error);
-            return null;
+            throw error;
         } finally {
             setIsSaving(false);
         }
-    }, [currentProject, loadProjects]);
+    }, [currentProjectId, loadProjects]);
 
     const switchToProject = useCallback(async (id: string): Promise<ImageProject | null> => {
 

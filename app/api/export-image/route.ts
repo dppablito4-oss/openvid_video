@@ -14,6 +14,13 @@ const FORMATS = {
 type ServerFormat = keyof typeof FORMATS;
 
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
+const MAX_INPUT_PIXELS = 4096 * 4096;
+
+// The client sends a PNG rendered from its canvas. Keep vector decoders out
+// of this public endpoint, regardless of the supplied filename or MIME type.
+function isPng(buffer: Buffer): boolean {
+  return buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+}
 
 export async function POST(request: NextRequest) {
   let format: string | null = null;
@@ -29,7 +36,7 @@ export async function POST(request: NextRequest) {
     if (file.size > MAX_INPUT_BYTES) {
       return NextResponse.json({ error: "Image too large" }, { status: 413 });
     }
-    if (!format || !(format in FORMATS)) {
+    if (!format || !Object.hasOwn(FORMATS, format)) {
       return NextResponse.json(
         { error: `Unsupported format: ${format ?? "(none)"}` },
         { status: 400 }
@@ -38,7 +45,10 @@ export async function POST(request: NextRequest) {
     const quality = Math.min(100, Math.max(1, Number(qualityRaw) || 80));
 
     const inputBuffer = Buffer.from(await file.arrayBuffer());
-    const pipeline = sharp(inputBuffer, { failOn: "none" });
+    if (!isPng(inputBuffer)) {
+      return NextResponse.json({ error: "Expected a PNG image" }, { status: 400 });
+    }
+    const pipeline = sharp(inputBuffer, { limitInputPixels: MAX_INPUT_PIXELS });
     const meta = await pipeline.metadata();
     if (!meta.width || !meta.height) {
       return NextResponse.json({ error: "Unreadable image" }, { status: 400 });

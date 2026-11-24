@@ -57,6 +57,7 @@ import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { TimelineSkeleton } from "@/app/components/ui/Skeleton";
 import { AudioTrimModal } from "@/app/components/ui/editor/AudioTrimModal";
 import { useMockup3dContext } from "@/app/contexts/Mockup3dContext";
+import { DEFAULT_MOCKUP_DEVICE_STATE, type MockupDeviceState } from "@/types/mockup-device.types";
 import { useAuth } from "@/app/contexts/useAuth";
 import { readPendingExport, clearPendingExport } from "@/lib/pending-export";
 import Image from "next/image";
@@ -103,6 +104,41 @@ export default function Editor() {
         imagePhoneRefWidth, setImagePhoneRefWidth,
         setCameraNavigationMode,
     } = useMockup3dContext();
+
+    const mockupDeviceState = useMemo<MockupDeviceState>(() => ({
+        imagePhoneActive, imagePhoneX, imagePhoneY, imagePhoneScale,
+        imagePhoneRotX, imagePhoneRotY, imagePhoneRotZ, imagePhonePerspective,
+        imagePhoneDevice, imagePhonePresetId, imagePhoneOpening,
+        imagePhoneShadow, imagePhoneShadowColor, imagePhoneRefWidth,
+    }), [
+        imagePhoneActive, imagePhoneX, imagePhoneY, imagePhoneScale,
+        imagePhoneRotX, imagePhoneRotY, imagePhoneRotZ, imagePhonePerspective,
+        imagePhoneDevice, imagePhonePresetId, imagePhoneOpening,
+        imagePhoneShadow, imagePhoneShadowColor, imagePhoneRefWidth,
+    ]);
+
+    const restoreMockupDeviceState = useCallback((saved: Partial<MockupDeviceState>) => {
+        const defaults = DEFAULT_MOCKUP_DEVICE_STATE;
+        setImagePhoneActive(saved.imagePhoneActive ?? defaults.imagePhoneActive);
+        setImagePhoneX(saved.imagePhoneX ?? defaults.imagePhoneX);
+        setImagePhoneY(saved.imagePhoneY ?? defaults.imagePhoneY);
+        setImagePhoneScale(saved.imagePhoneScale ?? defaults.imagePhoneScale);
+        setImagePhoneRotX(saved.imagePhoneRotX ?? defaults.imagePhoneRotX);
+        setImagePhoneRotY(saved.imagePhoneRotY ?? defaults.imagePhoneRotY);
+        setImagePhoneRotZ(saved.imagePhoneRotZ ?? defaults.imagePhoneRotZ);
+        setImagePhonePerspective(saved.imagePhonePerspective ?? defaults.imagePhonePerspective);
+        setImagePhoneDevice(saved.imagePhoneDevice ?? defaults.imagePhoneDevice);
+        setImagePhonePresetId(saved.imagePhonePresetId ?? defaults.imagePhonePresetId);
+        setImagePhoneOpening(saved.imagePhoneOpening ?? defaults.imagePhoneOpening);
+        setImagePhoneShadow(saved.imagePhoneShadow ?? defaults.imagePhoneShadow);
+        setImagePhoneShadowColor(saved.imagePhoneShadowColor ?? defaults.imagePhoneShadowColor);
+        setImagePhoneRefWidth(saved.imagePhoneRefWidth ?? defaults.imagePhoneRefWidth);
+    }, [
+        setImagePhoneActive, setImagePhoneX, setImagePhoneY, setImagePhoneScale,
+        setImagePhoneRotX, setImagePhoneRotY, setImagePhoneRotZ, setImagePhonePerspective,
+        setImagePhoneDevice, setImagePhonePresetId, setImagePhoneOpening,
+        setImagePhoneShadow, setImagePhoneShadowColor, setImagePhoneRefWidth,
+    ]);
 
     // Undo/Redo system - centralized state management
     const {
@@ -478,6 +514,8 @@ export default function Editor() {
     const isRestoringProjectRef = useRef(false);
     const isLoadingFromCacheRef = useRef(false);
     const lastRestoredProjectIdRef = useRef<string | null>(null);
+    const isSwitchingPhotoProjectRef = useRef(false);
+    const photoSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
     useEffect(() => {
         return () => {
@@ -488,6 +526,8 @@ export default function Editor() {
     }, []);
 
     const buildPhotoProjectSnapshot = useCallback(() => ({
+        ...mockupDeviceState,
+        imageZoomScale,
         backgroundTab, selectedWallpaper, backgroundBlur, selectedImageUrl,
         backgroundColorConfig, padding, roundedCorners, shadows, aspectRatio,
         customDimensions, cropArea, mockupId, mockupConfig, canvasElements,
@@ -505,36 +545,34 @@ export default function Editor() {
         backgroundColorConfig, padding, roundedCorners, shadows, aspectRatio,
         customDimensions, cropArea, mockupId, mockupConfig, canvasElements,
         videoTransform, imageTransform, apply3DToBackground, imageMaskConfig, mockupCamera,
+        mockupDeviceState, imageZoomScale,
     ]);
 
-    const autoSaveCurrentProject = useCallback(async () => {
-        if (!isPhotoMode || !imageUrl || !currentProject) return;
-        if (isRestoringProjectRef.current) return;
-        if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
-        autoSaveTimeoutRef.current = setTimeout(async () => {
-            try {
-                await saveCurrentProject({ ...buildPhotoProjectSnapshot(), imageZoomScale, imagePhoneActive, mockupCamera });
-            } catch (error) {
-                console.error("Auto-save failed:", error);
-            }
-        }, 3000);
-    }, [isPhotoMode, imageUrl, currentProject, saveCurrentProject, buildPhotoProjectSnapshot, imageZoomScale, imagePhoneActive, mockupCamera]);
-
     const currentProjectId = currentProject?.id ?? null;
-    const autoSaveRef = useRef(autoSaveCurrentProject);
-    useEffect(() => {
-        autoSaveRef.current = autoSaveCurrentProject;
-    });
+    const savePhotoProjectNow = useCallback(async () => {
+        if (autoSaveTimeoutRef.current) {
+            clearTimeout(autoSaveTimeoutRef.current);
+            autoSaveTimeoutRef.current = null;
+        }
+        if (!isPhotoMode || !imageUrl || !currentProjectId) return;
+        if (isRestoringProjectRef.current) return;
+        const snapshot = buildPhotoProjectSnapshot();
+        // Serialize writes so a slow earlier save cannot overwrite the flush
+        // performed before switching projects.
+        const save = photoSaveQueueRef.current.catch(() => {}).then(() => saveCurrentProject(snapshot));
+        photoSaveQueueRef.current = save;
+        await save;
+    }, [isPhotoMode, imageUrl, currentProjectId, saveCurrentProject, buildPhotoProjectSnapshot]);
 
     useEffect(() => {
-        if (!currentProjectId || !isPhotoMode || isRestoringProjectRef.current) return;
-        const timeoutId = setTimeout(() => {
-            autoSaveRef.current();
-        }, 300);
+        if (!currentProjectId || !isPhotoMode || isRestoringProjectRef.current || isSwitchingPhotoProjectRef.current) return;
+        autoSaveTimeoutRef.current = setTimeout(() => {
+            void savePhotoProjectNow().catch(error => console.error("Auto-save failed:", error));
+        }, 3000);
         return () => {
-            clearTimeout(timeoutId);
+            if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
         };
-    }, [autoSaveCurrentProject, currentProjectId, isPhotoMode]);
+    }, [savePhotoProjectNow, currentProjectId, isPhotoMode]);
 
     // Restore current project when project ID changes (not on every currentProject update)
     useEffect(() => {
@@ -571,6 +609,7 @@ export default function Editor() {
             setApply3DToBackground(currentProject.apply3DToBackground);
             setImageMaskConfig(currentProject.imageMaskConfig);
             setImageZoomScale(currentProject.imageZoomScale ?? 1);
+            restoreMockupDeviceState(currentProject);
             setMockupCamera(normalizeMockupCameraConfig(currentProject.mockupCamera));
             setImageDimensions({
                 width: currentProject.imageWidth,
@@ -581,20 +620,23 @@ export default function Editor() {
                 isRestoringProjectRef.current = false;
             }, 500);
         });
-    }, [currentProject, isPhotoMode]);
+    }, [currentProject, isPhotoMode, restoreMockupDeviceState, setCanvasElements, setMockupCamera]);
 
     // Image project handlers
     const handleSelectImageProject = useCallback(async (projectId: string) => {
-        if (!isPhotoMode) return;
-
-        // Save current project before switching
-        if (currentProject && imageUrl) {
-            await autoSaveCurrentProject();
+        if (!isPhotoMode || projectId === currentProjectId || isSwitchingPhotoProjectRef.current) return;
+        // Do not leave a project while its loaded state is still being applied.
+        if (isRestoringProjectRef.current) return;
+        isSwitchingPhotoProjectRef.current = true;
+        try {
+            await savePhotoProjectNow();
+            await switchToProject(projectId);
+        } catch (error) {
+            console.error("Could not save project before switching:", error);
+        } finally {
+            isSwitchingPhotoProjectRef.current = false;
         }
-
-        // Load the selected project
-        await switchToProject(projectId);
-    }, [isPhotoMode, currentProject, imageUrl, autoSaveCurrentProject, switchToProject]);
+    }, [isPhotoMode, currentProjectId, savePhotoProjectNow, switchToProject]);
 
     const handleAddImageToCanvas = useCallback(async (projectId: string) => {
         await handleSelectImageProject(projectId);
@@ -640,17 +682,23 @@ export default function Editor() {
     }, [currentProject, removeProject]);
 
     const createImageProjectFromFile = useCallback(async (file: File, errorLabel: string) => {
+        if (isSwitchingPhotoProjectRef.current || isRestoringProjectRef.current) return;
+        isSwitchingPhotoProjectRef.current = true;
         try {
+            await savePhotoProjectNow();
             const img = await createImageBitmap(file);
             const project = await createProject(file, file.name, img.width, img.height, buildPhotoProjectSnapshot());
             if (project) {
                 setImageUrl(project.imageDataUrl);
                 setImageDimensions({ width: img.width, height: img.height });
             }
+            img.close();
         } catch (error) {
             console.error(`Failed to ${errorLabel}:`, error);
+        } finally {
+            isSwitchingPhotoProjectRef.current = false;
         }
-    }, [createProject, buildPhotoProjectSnapshot]);
+    }, [createProject, buildPhotoProjectSnapshot, savePhotoProjectNow]);
 
     const handleImageUploadToCanvas = useCallback(
         (file: File) => createImageProjectFromFile(file, "upload image"),
@@ -1102,6 +1150,7 @@ export default function Editor() {
     }, [currentTime]);
 
     const buildVideoProjectSnapshot = useCallback(() => ({
+        ...mockupDeviceState,
         videoClips,
         trimRange,
         globalSpeed,
@@ -1141,7 +1190,7 @@ export default function Editor() {
             ? (videoClips.find(c => c.hasCamera)?.libraryVideoId ?? null)
             : null,
     }), [
-        videoClips, trimRange, globalSpeed,
+        mockupDeviceState, videoClips, trimRange, globalSpeed,
         zoomFragments, zoomMovements,
         audioTracks, uploadedAudios, muteOriginalAudio, masterVolume,
         canvasElements,
@@ -1936,6 +1985,7 @@ export default function Editor() {
                         setImageMaskConfig(savedProject.imageMaskConfig);
                         setVideoMaskConfig(savedProject.videoMaskConfig);
                         setImageZoomScale(savedProject.imageZoomScale ?? 1);
+                        restoreMockupDeviceState(savedProject);
                         setMockupMotionFragments(savedProject.mockupMotionFragments ?? []);
                         setGlobalSpeed(savedProject.globalSpeed ?? 1);
 

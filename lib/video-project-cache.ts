@@ -10,6 +10,7 @@ import type { Preview3DConfig, ImageMaskConfig } from "@/types/photo.types";
 import type { TrimRange } from "@/types/timeline.types";
 import type { MockupCameraConfig, MockupCameraKeyframe } from "@/lib/viewer-controls3d";
 import type { CameraOverlayKeyframe } from "@/lib/camera-overlay-animation";
+import type { MockupDeviceState } from "@/types/mockup-device.types";
 
 const DB_NAME = "openvid-video-project";
 const DB_VERSION = 3;
@@ -19,7 +20,7 @@ const CAMERA_STORE = "camera";
 const PROJECT_KEY = "singleton";
 const CAMERA_KEY = "singleton";
 
-export interface VideoProject {
+export interface VideoProject extends Partial<MockupDeviceState> {
     id: typeof PROJECT_KEY;
     savedAt: number;
     schemaVersion: 1;
@@ -150,7 +151,8 @@ export async function saveVideoProject(project: Omit<VideoProject, "id" | "saved
             const store = transaction.objectStore(PROJECT_STORE);
             const request = store.put(fullProject);
 
-            request.onsuccess = () => resolve(fullProject);
+            transaction.oncomplete = () => resolve(fullProject);
+            transaction.onabort = () => reject(transaction.error);
             request.onerror = () => reject(request.error);
         });
     } catch (error) {

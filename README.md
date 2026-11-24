@@ -149,6 +149,10 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000)
 
+The dev and build scripts use Webpack for compatibility with the FFmpeg worker loader.
+
+Run the regression tests with `pnpm test` (Node.js 22.14 or newer).
+
 ---
 
 ## 💬 Community

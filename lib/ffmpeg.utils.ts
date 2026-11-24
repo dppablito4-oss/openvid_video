@@ -1,4 +1,4 @@
-import { VideoTrackClip } from "@/types/video-track.types";
+import type { VideoTrackClip } from "@/types/video-track.types";
 
 export function buildAtempoChain(speed: number): string {
     if (!speed || speed <= 0) return "atempo=1.0";
@@ -24,7 +24,7 @@ export function getActiveClipAtTime(clips: VideoTrackClip[], timelineTime: numbe
 
 export function resolveClipTrimStart(clips: VideoTrackClip[] | undefined, fallbackTimelineStart: number): number {
     if (clips && clips.length === 1) {
-        return clips[0].trimStart;
+        return clips[0].trimStart + Math.max(0, fallbackTimelineStart - clips[0].startTime);
     }
     return fallbackTimelineStart;
 }

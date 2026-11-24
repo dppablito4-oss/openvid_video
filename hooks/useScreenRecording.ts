@@ -394,6 +394,9 @@ export function useScreenRecording() {
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const cameraConfigRef = useRef<CameraConfig | null>(null);
   const cancelledRef = useRef(false);
+  const captureAttemptRef = useRef(0);
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recordingStartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     stateRef.current = state;
@@ -444,6 +447,14 @@ export function useScreenRecording() {
   }, [state]);
 
   const cleanupStreams = useCallback(() => {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    if (recordingStartTimeoutRef.current) {
+      clearTimeout(recordingStartTimeoutRef.current);
+      recordingStartTimeoutRef.current = null;
+    }
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach((t) => t.stop());
       screenStreamRef.current = null;
@@ -463,6 +474,15 @@ export function useScreenRecording() {
     setCameraStream(null);
   }, []);
 
+  useEffect(() => () => {
+    cancelledRef.current = true;
+    captureAttemptRef.current += 1;
+    if (screenRecorderRef.current?.state !== "inactive") screenRecorderRef.current?.stop();
+    if (cameraRecorderRef.current?.state !== "inactive") cameraRecorderRef.current?.stop();
+    cleanupStreams();
+    restoreOriginals();
+  }, [cleanupStreams, restoreOriginals]);
+
   const stopRecording = useCallback(() => {
     if (screenRecorderRef.current && screenRecorderRef.current.state !== "inactive") {
       screenRecorderRef.current.stop();
@@ -478,8 +498,8 @@ export function useScreenRecording() {
 
   const startRecording = useCallback(
     (screenStream: MediaStream, camStream: MediaStream | null) => {
+      if (cancelledRef.current || !screenStream.getVideoTracks().some(track => track.readyState === "live")) return;
       try {
-        cancelledRef.current = false;
         screenChunksRef.current = [];
         cameraChunksRef.current = [];
         startTimeRef.current = Date.now();
@@ -617,10 +637,21 @@ export function useScreenRecording() {
         }
 
         setState("recording");
-        setTimeout(() => {
-          startTimeRef.current = Date.now();
-          screenRecorder.start(1000);
-          cameraRecorder?.start(1000);
+        recordingStartTimeoutRef.current = setTimeout(() => {
+          recordingStartTimeoutRef.current = null;
+          if (cancelledRef.current) return;
+          try {
+            startTimeRef.current = Date.now();
+            screenRecorder.start(1000);
+            cameraRecorder?.start(1000);
+          } catch (err) {
+            cancelledRef.current = true;
+            if (screenRecorder.state !== "inactive") screenRecorder.stop();
+            cleanupStreams();
+            setError(err instanceof Error ? err.message : "Could not start recording");
+            setState("idle");
+            restoreOriginals();
+          }
         }, 300);
       } catch (err) {
         console.error("Error starting recording:", err);
@@ -635,6 +666,9 @@ export function useScreenRecording() {
 
   const startCountdown = useCallback(
     async (setupArg?: RecordingSetupConfig) => {
+      cancelledRef.current = false;
+      const attempt = ++captureAttemptRef.current;
+      const isCancelled = () => cancelledRef.current || attempt !== captureAttemptRef.current;
       const setup: RecordingSetupConfig = setupArg ?? DEFAULT_RECORDING_SETUP;
       try {
         setError(null);
@@ -645,12 +679,32 @@ export function useScreenRecording() {
             ? { echoCancellation: true, noiseSuppression: true }
             : false,
         });
+        if (isCancelled()) {
+          screenStream.getTracks().forEach(track => track.stop());
+          return;
+        }
         screenStreamRef.current = screenStream;
+
+        screenStream.getVideoTracks()[0].onended = () => {
+          if (stateRef.current === "recording" && screenRecorderRef.current?.state === "recording") {
+            stopRecording();
+          } else {
+            cancelledRef.current = true;
+            captureAttemptRef.current += 1;
+            setState("idle");
+            cleanupStreams();
+            restoreOriginals();
+          }
+        };
 
         let camStream: MediaStream | null = null;
         if (setup.camera.enabled) {
           try {
             camStream = await requestCameraStream(setup.camera.deviceId);
+            if (isCancelled()) {
+              camStream.getTracks().forEach(track => track.stop());
+              return;
+            }
             cameraStreamRef.current = camStream;
             setCameraStream(camStream);
             setCameraConfig(setup.camera);
@@ -666,12 +720,17 @@ export function useScreenRecording() {
               noiseSuppression: setup.microphone.noiseSuppression,
               echoCancellation: setup.microphone.echoCancellation,
             });
+            if (isCancelled()) {
+              micStream.getTracks().forEach(track => track.stop());
+              return;
+            }
             micStreamRef.current = micStream;
           } catch (err) {
             console.warn("Microphone denied, continuing without microphone:", err);
           }
         }
 
+        if (isCancelled()) return;
         const screenAudioTracks = screenStream.getAudioTracks();
         const micAudioTracks = micStream ? micStream.getAudioTracks() : [];
         const needsMixing = micAudioTracks.length > 0;
@@ -714,28 +773,21 @@ export function useScreenRecording() {
           }
         }
 
-        screenStream.getVideoTracks()[0].onended = () => {
-          if (stateRef.current === "recording") {
-            stopRecording();
-          } else {
-            setState("idle");
-            cleanupStreams();
-            restoreOriginals();
-          }
-        };
-
         setState("countdown");
         setCountdown(4);
         let count = 4;
-        const countdownInterval = setInterval(() => {
+        countdownIntervalRef.current = setInterval(() => {
+          if (isCancelled()) return;
           count -= 1;
           setCountdown(count);
           if (count <= 0) {
-            clearInterval(countdownInterval);
+            if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+            countdownIntervalRef.current = null;
             startRecording(finalScreenStream, camStream);
           }
         }, 1000);
       } catch (err) {
+        if (isCancelled()) return;
         console.error("Error starting capture:", err);
         setError("Could not start screen capture");
         setState("idle");
@@ -748,6 +800,7 @@ export function useScreenRecording() {
 
   const cancelRecording = useCallback(() => {
     cancelledRef.current = true;
+    captureAttemptRef.current += 1;
     if (screenRecorderRef.current && screenRecorderRef.current.state !== "inactive") {
       screenRecorderRef.current.stop();
     }
